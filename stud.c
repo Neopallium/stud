@@ -54,7 +54,9 @@
 #include <openssl/err.h>
 #include <ev.h>
 
-#include "ringbuffer.h"
+
+#include "bufferpool.h"
+static BufferPool *pool;
 #include "shctx.h"
 
 #ifndef MSG_NOSIGNAL
@@ -63,6 +65,7 @@
 #ifndef AI_ADDRCONFIG
 # define AI_ADDRCONFIG 0
 #endif
+
 
 /* Globals */
 static struct ev_loop *loop;
@@ -139,9 +142,13 @@ typedef enum _SHUTDOWN_REQUESTOR {
  *
  * All state associated with one proxied connection
  */
+#define MAX_READ_SIZE 1024 * 16
+#define MAX_PROXY_BUFFER 128 * 1024
 typedef struct proxystate {
-    ringbuffer ring_down; /* pushing bytes from client to backend */
-    ringbuffer ring_up;   /* pushing bytes from backend to client */
+    STAILQ_HEAD(list_down, Buffer) buf_down; /* pushing bytes from client to backend */
+    STAILQ_HEAD(list_up, Buffer) buf_up;   /* pushing bytes from backend to client */
+    uint32_t off_down;
+    uint32_t off_up;
 
     ev_io ev_r_up;        /* Upstream write event */
     ev_io ev_w_up;        /* Upstream read event */
@@ -155,11 +162,12 @@ typedef struct proxystate {
     int fd_up;            /* Upstream (client) socket */
     int fd_down;          /* Downstream (backend) socket */
 
-    int want_shutdown;    /* Connection is half-shutdown */
-
     SSL *ssl;             /* OpenSSL SSL state */
 
     struct sockaddr_storage remote_ip;  /* Remote ip returned from `accept` */
+    int want_shutdown;    /* Connection is half-shutdown */
+    int32_t buffer_len;
+
 } proxystate;
 
 /* set a file descriptor (socket) to non-blocking mode */
@@ -379,9 +387,9 @@ static void shutdown_proxy(proxystate *ps, SHUTDOWN_REQUESTOR req) {
     }
     else {
         ps->want_shutdown = 1;
-        if (req == SHUTDOWN_DOWN && ringbuffer_is_empty(&ps->ring_up))
+        if (req == SHUTDOWN_DOWN && STAILQ_EMPTY(&ps->buf_up))
             shutdown_proxy(ps, SHUTDOWN_HARD);
-        else if (req == SHUTDOWN_UP && ringbuffer_is_empty(&ps->ring_down))
+        else if (req == SHUTDOWN_UP && STAILQ_EMPTY(&ps->buf_down))
             shutdown_proxy(ps, SHUTDOWN_HARD);
     }
 }
@@ -414,20 +422,27 @@ static void back_read(struct ev_loop *loop, ev_io *w, int revents) {
         return;
     }
     int fd = w->fd;
-    char * buf = ringbuffer_write_ptr(&ps->ring_up);
-    t = recv(fd, buf, RING_DATA_LEN, 0);
+    Buffer *buf = bufferpool_get_buffer(pool, MAX_READ_SIZE);
+    t = recv(fd, buffer_data(buf), MAX_READ_SIZE, 0);
 
     if (t > 0) {
-        ringbuffer_write_append(&ps->ring_up, t);
-        if (ringbuffer_is_full(&ps->ring_up))
-            ev_io_stop(loop, &ps->ev_r_down);
+        /* trim buffer. */
+        buffer_set_length(buf, t);
+        /* add buffer to queue. */
+        STAILQ_INSERT_TAIL(&ps->buf_up, buf, bufs);
+        /* disable reading if Connection buffer is full. */
+        ps->buffer_len += t;
+        if (ps->buffer_len > MAX_PROXY_BUFFER)
+            ev_io_stop(loop, &ps->ev_r_down);//TODO:disable both read watchers. where do we enable?
         safe_enable_io(ps, &ps->ev_w_up);
     }
     else if (t == 0) {
+        buffer_free(buf);
         LOG("{backend} Connection closed\n");
         shutdown_proxy(ps, SHUTDOWN_DOWN);
     }
     else {
+        buffer_free(buf);
         assert(t == -1);
         handle_socket_errno(ps);
     }
@@ -439,18 +454,20 @@ static void back_write(struct ev_loop *loop, ev_io *w, int revents) {
     int t;
     proxystate *ps = (proxystate *)w->data;
     int fd = w->fd;
-    int sz;
 
-    assert(!ringbuffer_is_empty(&ps->ring_down));
+    assert(!STAILQ_EMPTY(&ps->buf_down));
 
-    char *next = ringbuffer_read_next(&ps->ring_down, &sz);
-    t = send(fd, next, sz, MSG_NOSIGNAL);
+    Buffer *buf = STAILQ_FIRST(&ps->buf_down);
+    int sz = buffer_length(buf) - ps->off_down;
+    t = send(fd, buffer_data(buf) + ps->off_down, sz, MSG_NOSIGNAL);
 
     if (t > 0) {
         if (t == sz) {
-            ringbuffer_read_pop(&ps->ring_down);
+            ps->buffer_len -= buffer_length(buf);
+            STAILQ_REMOVE_HEAD(&ps->buf_down, bufs);
+            ps->off_down = 0;
             safe_enable_io(ps, &ps->ev_r_up);
-            if (ringbuffer_is_empty(&ps->ring_down)) {
+            if (STAILQ_EMPTY(&ps->buf_down)) {
                 if (ps->want_shutdown) {
                     shutdown_proxy(ps, SHUTDOWN_HARD);
                     return; // dealloc'd
@@ -459,7 +476,7 @@ static void back_write(struct ev_loop *loop, ev_io *w, int revents) {
             }
         }
         else {
-            ringbuffer_read_skip(&ps->ring_down, t);
+            ps->off_down += t;
         }
     }
     else {
@@ -487,13 +504,14 @@ static void handle_connect(struct ev_loop *loop, ev_io *w, int revents) {
         start_handshake(ps, SSL_ERROR_WANT_READ); /* for client-first handshake */
         ev_io_start(loop, &ps->ev_r_down);
         if (OPTIONS.WRITE_PROXY_LINE) {
-            char *ring_pnt = ringbuffer_write_ptr(&ps->ring_down);
+            Buffer *buf = bufferpool_get_buffer(pool, MAX_READ_SIZE);
+            char *buf_pnt = (char *)buffer_data(buf);
             assert(ps->remote_ip.ss_family == AF_INET ||
 		   ps->remote_ip.ss_family == AF_INET6);
 	    if(ps->remote_ip.ss_family == AF_INET) {
 	      struct sockaddr_in* addr = (struct sockaddr_in*)&ps->remote_ip;
-	      written = snprintf(ring_pnt,
-				 RING_DATA_LEN,
+	      written = snprintf(buf_pnt,
+				 MAX_READ_SIZE,
 				 tcp_proxy_line,
 				 "TCP4",
 				 inet_ntoa(addr->sin_addr),
@@ -502,30 +520,34 @@ static void handle_connect(struct ev_loop *loop, ev_io *w, int revents) {
 	    else if (ps->remote_ip.ss_family == AF_INET6) {
 	      struct sockaddr_in6* addr = (struct sockaddr_in6*)&ps->remote_ip;
 	      inet_ntop(AF_INET6,&(addr->sin6_addr),tcp6_address_string,INET6_ADDRSTRLEN);
-	      written = snprintf(ring_pnt,
-				 RING_DATA_LEN,
+	      written = snprintf(buf_pnt,
+				 MAX_READ_SIZE,
 				 tcp_proxy_line,
 				 "TCP6",
 				 tcp6_address_string,
 				 ntohs(addr->sin6_port));
-	    }   
-            ringbuffer_write_append(&ps->ring_down, written);
+	    }
+            buffer_set_length(buf, written);
+            STAILQ_INSERT_TAIL(&ps->buf_down, buf, bufs);
             ev_io_start(loop, &ps->ev_w_down);
         }
         else if (OPTIONS.WRITE_IP_OCTET) {
-            char *ring_pnt = ringbuffer_write_ptr(&ps->ring_down);
+            Buffer *buf = bufferpool_get_buffer(pool, MAX_READ_SIZE);
+            char *buf_pnt = (char *)buffer_data(buf);
             assert(ps->remote_ip.ss_family == AF_INET ||
                    ps->remote_ip.ss_family == AF_INET6);
-            *ring_pnt++ = (unsigned char) ps->remote_ip.ss_family;
+            *buf_pnt++ = (unsigned char) ps->remote_ip.ss_family;
             if (ps->remote_ip.ss_family == AF_INET6) {
-                memcpy(ring_pnt, &((struct sockaddr_in6 *) &ps->remote_ip)
+                memcpy(buf_pnt, &((struct sockaddr_in6 *) &ps->remote_ip)
                        ->sin6_addr.s6_addr, 16U);
-                ringbuffer_write_append(&ps->ring_down, 1U + 16U);
+                written = 1U + 16U;
             } else {
-                memcpy(ring_pnt, &((struct sockaddr_in *) &ps->remote_ip)
+                memcpy(buf_pnt, &((struct sockaddr_in *) &ps->remote_ip)
                        ->sin_addr.s_addr, 4U);
-                ringbuffer_write_append(&ps->ring_down, 1U + 4U);
+                written = 1U + 4U;
             }
+            buffer_set_length(buf, written);
+            STAILQ_INSERT_TAIL(&ps->buf_down, buf, bufs);
             ev_io_start(loop, &ps->ev_w_down);
         }
     }
@@ -556,11 +578,11 @@ static void end_handshake(proxystate *ps) {
     ev_io_stop(loop, &ps->ev_w_handshake);
 
     /* if incoming buffer is not full */
-    if (!ringbuffer_is_full(&ps->ring_down))
+    if (ps->buffer_len < MAX_PROXY_BUFFER)
         safe_enable_io(ps, &ps->ev_r_up);
 
     /* if outgoing buffer is not empty */
-    if (!ringbuffer_is_empty(&ps->ring_up))
+    if (!STAILQ_EMPTY(&ps->buf_up))
         // not safe.. we want to resume stream even during half-closed
         ev_io_start(loop, &ps->ev_w_up);
 }
@@ -622,15 +644,21 @@ static void client_read(struct ev_loop *loop, ev_io *w, int revents) {
         ev_io_stop(loop, &ps->ev_r_up);
         return;
     }
-    char * buf = ringbuffer_write_ptr(&ps->ring_down);
-    t = SSL_read(ps->ssl, buf, RING_DATA_LEN);
+    Buffer *buf = bufferpool_get_buffer(pool, MAX_READ_SIZE);
+    t = SSL_read(ps->ssl, buffer_data(buf), MAX_READ_SIZE);
     if (t > 0) {
-        ringbuffer_write_append(&ps->ring_down, t);
-        if (ringbuffer_is_full(&ps->ring_down))
-            ev_io_stop(loop, &ps->ev_r_up);
+        /* trim buffer. */
+        buffer_set_length(buf, t);
+        /* add buffer to queue. */
+        STAILQ_INSERT_TAIL(&ps->buf_down, buf, bufs);
+        /* disable reading if Connection buffer is full. */
+        ps->buffer_len += t;
+        if (ps->buffer_len > MAX_PROXY_BUFFER)
+            ev_io_stop(loop, &ps->ev_r_up);// TODO: disable both read watchers. where do we enable?
         safe_enable_io(ps, &ps->ev_w_down);
     }
     else {
+        buffer_free(buf);
         int err = SSL_get_error(ps->ssl, t);
         if (err == SSL_ERROR_WANT_WRITE) {
             start_handshake(ps, err);
@@ -646,16 +674,18 @@ static void client_read(struct ev_loop *loop, ev_io *w, int revents) {
 static void client_write(struct ev_loop *loop, ev_io *w, int revents) {
     (void) revents;
     int t;
-    int sz;
     proxystate *ps = (proxystate *)w->data;
-    assert(!ringbuffer_is_empty(&ps->ring_up));
-    char * next = ringbuffer_read_next(&ps->ring_up, &sz);
-    t = SSL_write(ps->ssl, next, sz);
+    assert(!STAILQ_EMPTY(&ps->buf_up));
+    Buffer *buf = STAILQ_FIRST(&ps->buf_up);
+    int sz = buffer_length(buf) - ps->off_up;
+    t = SSL_write(ps->ssl, buffer_data(buf) + ps->off_down, sz);
     if (t > 0) {
         if (t == sz) {
-            ringbuffer_read_pop(&ps->ring_up);
+            ps->buffer_len -= buffer_length(buf);
+            STAILQ_REMOVE_HEAD(&ps->buf_up, bufs);
+            ps->off_up = 0;
             safe_enable_io(ps, &ps->ev_r_down); // can be re-enabled b/c we've popped
-            if (ringbuffer_is_empty(&ps->ring_up)) {
+            if (STAILQ_EMPTY(&ps->buf_up)) {
                 if (ps->want_shutdown) {
                     shutdown_proxy(ps, SHUTDOWN_HARD);
                     return;
@@ -664,7 +694,7 @@ static void client_write(struct ev_loop *loop, ev_io *w, int revents) {
             }
         }
         else {
-            ringbuffer_read_skip(&ps->ring_up, t);
+            ps->off_up += t;
         }
     }
     else {
@@ -730,8 +760,11 @@ static void handle_accept(struct ev_loop *loop, ev_io *w, int revents) {
     ps->ssl = ssl;
     ps->want_shutdown = 0;
     ps->remote_ip = addr;
-    ringbuffer_init(&ps->ring_up);
-    ringbuffer_init(&ps->ring_down);
+    STAILQ_INIT(&ps->buf_up);
+    STAILQ_INIT(&ps->buf_down);
+    ps->off_down = 0;
+    ps->off_up = 0;
+    ps->buffer_len = 0;
 
     /* set up events */
     ev_io_init(&ps->ev_r_up, client_read, client, EV_READ);
@@ -784,6 +817,7 @@ static void handle_connections(SSL_CTX *ctx) {
         ERR("{core-warning} Unable to attach to CPU #%d; do you have that many cores?\n", child_num);
 #endif
 
+    pool = bufferpool_new();
     loop = ev_default_loop(EVFLAG_AUTO);
 
     ev_timer timer_ppid_check;
