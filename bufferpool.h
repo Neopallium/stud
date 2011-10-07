@@ -16,6 +16,7 @@ typedef uint16_t buflen_t;
 #define BUFFER_OVERHEAD (sizeof(Buffer))
 
 #define BUFFER_MAX_LENGTH (((1<< (sizeof(buflen_t) * 8)) - 1) - BUFFER_OVERHEAD)
+#define BUFFER_FREE_MARK ((1<< (sizeof(buflen_t) * 8)) - 1)
 
 #define BUFFER_VALID(buf) assert((((ptrdiff_t)(buf)) & (BUFFER_UNITS - 1)) == 0)
 
@@ -38,7 +39,7 @@ struct Buffer {
 
 static inline int buffer_is_free(Buffer *buf) {
 	BUFFER_VALID(buf);
-	return (buf->len == 0) ? 1 : 0;
+	return (buf->len == BUFFER_FREE_MARK) ? 1 : 0;
 }
 
 static inline int buffer_is_last_buffer(Buffer *buf) {

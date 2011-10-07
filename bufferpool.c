@@ -26,7 +26,7 @@ static void bufferpoolblock_free_buffer(BufferPoolBlock *block, Buffer *buf);
 struct BufferPoolBlock {
 	BufferPool      *pool;     /**< owner buffer pool. */
 	LIST_ENTRY(BufferPoolBlock) blocks; /**< next/prev block */
-	uint32_t        free_len;  /**< total free space in this block (in bytes not units). */
+	int32_t         free_size; /**< total free space in this block (in buffer units). */
 	buflen_t        next_free; /**< index to next free buffer. */
 };
 
@@ -40,6 +40,8 @@ struct BufferPoolBlock {
 	(BUFFER_POOL_BLOCK_HEADER_SIZE /* block header */ + BUFFER_UNITS /* last buffer (size == 0) */)
 /* total usable length of each block. */
 #define BUFFER_POOL_BLOCK_USABLE_LENGTH (BUFFER_POOL_BLOCK_LENGTH - BUFFER_POOL_BLOCK_OVERHEAD)
+/* total usable size of each block (in buffer units). */
+#define BUFFER_POOL_BLOCK_USABLE_SIZE (int32_t)(BUFFER_POOL_BLOCK_USABLE_LENGTH / BUFFER_UNITS)
 
 /* get pointer to a buffer in a block. */
 #define BUFFER_POOL_BLOCK_TO_BUFFER(block, idx) \
@@ -69,7 +71,7 @@ void buffer_free(Buffer *buf) {
 	/* check if buffer is already free. */
 	if(buffer_is_free(buf)) return;
 	/* mark buffer as free. */
-	buf->len = 0;
+	buf->len = BUFFER_FREE_MARK;
 	/* tell owner block that the buffer is free. */
 	block = (BufferPoolBlock *)BUFFER_OFFSET_SUB(buf, buf->block);
 	bufferpoolblock_free_buffer(block, buf);
@@ -95,9 +97,11 @@ static void buffer_split(Buffer *buf, buflen_t new_size) {
 	memset(next, 0, sizeof(Buffer));
 	next->block = buf->block + new_size;
 	next->size = extra_size;
+	/* mark new buffer as free. */
+	next->len = BUFFER_FREE_MARK;
 	/* track free space in block. */
 	block = (BufferPoolBlock *)BUFFER_OFFSET_SUB(buf, buf->block);
-	block->free_len += next->size;
+	block->free_size += next->size;
 }
 
 void buffer_set_length(Buffer *buf, uint32_t len) {
@@ -125,7 +129,7 @@ void buffer_set_length(Buffer *buf, uint32_t len) {
 static void bufferpoolblock_reset(BufferPoolBlock *block) {
 	Buffer *buf;
 
-	block->free_len = BUFFER_POOL_BLOCK_USABLE_LENGTH;
+	block->free_size = BUFFER_POOL_BLOCK_USABLE_SIZE;
 
 	/* initialize last buffer. */
 	buf = BUFFER_POOL_BLOCK_TO_BUFFER(block, BUFFER_POOL_BLOCK_LAST_BUFFER);
@@ -137,8 +141,8 @@ static void bufferpoolblock_reset(BufferPoolBlock *block) {
 	block->next_free = BUFFER_POOL_BLOCK_FIRST_BUFFER;
 	buf = BUFFER_POOL_BLOCK_TO_BUFFER(block, BUFFER_POOL_BLOCK_FIRST_BUFFER);
 	buf->block = BUFFER_POOL_BLOCK_FIRST_BUFFER;
-	buf->size = block->free_len / BUFFER_UNITS;
-	buf->len = 0; /* mark it as free. */
+	buf->size = block->free_size;
+	buf->len = BUFFER_FREE_MARK; /* mark it as free. */
 }
 
 static BufferPoolBlock *bufferpoolblock_new() {
@@ -162,25 +166,32 @@ static Buffer *bufferpoolblock_get_buffer(BufferPoolBlock *block, uint32_t min_s
 	/* get buffer at next free index. */
 	buf = BUFFER_POOL_BLOCK_TO_BUFFER(block, block->next_free);
 	/* skip to next buffer if this one is still used. */
-	while(!buffer_is_free(buf) && !buffer_is_last_buffer(buf)) {
+	while(!buffer_is_free(buf)) {
+		if(buffer_is_last_buffer(buf)) {
+			/* hit end of block, no free buffers. */
+			return NULL;
+		}
 		buf = buffer_get_next(buf);
 	}
 	if(buffer_size(buf) < min_size) {
 		return NULL;
 	}
 	block->next_free = buf->block;
+	/* remove free mark. */
+	buf->len = 0;
 	/* track free space in block. */
-	block->free_len -= buf->size;
+	block->free_size -= buf->size;
+	assert(block->free_size >= 0);
 	return buf;
 }
 
 static void bufferpoolblock_free_buffer(BufferPoolBlock *block, Buffer *buf) {
 	Buffer *next;
 	/* track free space in this block. */
-	block->free_len += buf->size;
-	assert(block->free_len <= BUFFER_POOL_BLOCK_USABLE_LENGTH);
+	block->free_size += buf->size;
+	assert(block->free_size <= BUFFER_POOL_BLOCK_USABLE_SIZE);
 	/* check if block is completely free. */
-	if(block->free_len == BUFFER_POOL_BLOCK_USABLE_LENGTH) {
+	if(block->free_size == BUFFER_POOL_BLOCK_USABLE_SIZE) {
 		/* block is empty reset it. */
 		bufferpoolblock_reset(block);
 		/* put block on pool's free list. */
@@ -240,7 +251,7 @@ BufferPool *bufferpool_new_full(size_t min_free, size_t max_free) {
 	if(max_free > BUFFER_POOL_BLOCK_LENGTH) {
 		pool->max_free_blocks = max_free / BUFFER_POOL_BLOCK_LENGTH;
 	} else {
-		pool->max_free_blocks = 10;
+		pool->max_free_blocks = 100;
 	}
 	LIST_INIT(&(pool->used_head));
 	LIST_INIT(&(pool->free_head));

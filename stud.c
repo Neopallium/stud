@@ -143,7 +143,7 @@ typedef enum _SHUTDOWN_REQUESTOR {
  * All state associated with one proxied connection
  */
 #define MAX_READ_SIZE 1024 * 16
-#define MAX_PROXY_BUFFER 128 * 1024
+#define MAX_PROXY_BUFFER 32 * 1024
 typedef struct proxystate {
     STAILQ_HEAD(list_down, Buffer) buf_down; /* pushing bytes from client to backend */
     STAILQ_HEAD(list_up, Buffer) buf_up;   /* pushing bytes from backend to client */
@@ -383,6 +383,13 @@ static void shutdown_proxy(proxystate *ps, SHUTDOWN_REQUESTOR req) {
         SSL_set_shutdown(ps->ssl, SSL_SENT_SHUTDOWN);
         SSL_free(ps->ssl);
 
+        Buffer *buf;
+        STAILQ_FOREACH(buf, &ps->buf_up, bufs) {
+            buffer_free(buf);
+        }
+        STAILQ_FOREACH(buf, &ps->buf_down, bufs) {
+            buffer_free(buf);
+        }
         free(ps);
     }
     else {
