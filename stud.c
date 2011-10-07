@@ -465,6 +465,7 @@ static void back_write(struct ev_loop *loop, ev_io *w, int revents) {
         if (t == sz) {
             ps->buffer_len -= buffer_length(buf);
             STAILQ_REMOVE_HEAD(&ps->buf_down, bufs);
+            buffer_free(buf);
             ps->off_down = 0;
             safe_enable_io(ps, &ps->ev_r_up);
             if (STAILQ_EMPTY(&ps->buf_down)) {
@@ -683,6 +684,7 @@ static void client_write(struct ev_loop *loop, ev_io *w, int revents) {
         if (t == sz) {
             ps->buffer_len -= buffer_length(buf);
             STAILQ_REMOVE_HEAD(&ps->buf_up, bufs);
+            buffer_free(buf);
             ps->off_up = 0;
             safe_enable_io(ps, &ps->ev_r_down); // can be re-enabled b/c we've popped
             if (STAILQ_EMPTY(&ps->buf_up)) {

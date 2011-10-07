@@ -66,6 +66,8 @@ BufferPool *buffer_get_pool(Buffer *buf) {
 void buffer_free(Buffer *buf) {
 	BufferPoolBlock *block;
 	BUFFER_VALID(buf);
+	/* check if buffer is already free. */
+	if(buffer_is_free(buf)) return;
 	/* mark buffer as free. */
 	buf->len = 0;
 	/* tell owner block that the buffer is free. */
@@ -74,8 +76,10 @@ void buffer_free(Buffer *buf) {
 }
 
 static void buffer_split(Buffer *buf, buflen_t new_size) {
+	BufferPoolBlock *block;
 	Buffer *next;
 	buflen_t extra_size;
+
 	BUFFER_VALID(buf);
 	/* calculate extra space. */
 	extra_size = buf->size - new_size;
@@ -91,6 +95,9 @@ static void buffer_split(Buffer *buf, buflen_t new_size) {
 	memset(next, 0, sizeof(Buffer));
 	next->block = buf->block + new_size;
 	next->size = extra_size;
+	/* track free space in block. */
+	block = (BufferPoolBlock *)BUFFER_OFFSET_SUB(buf, buf->block);
+	block->free_len += next->size;
 }
 
 void buffer_set_length(Buffer *buf, uint32_t len) {
@@ -161,13 +168,14 @@ static Buffer *bufferpoolblock_get_buffer(BufferPoolBlock *block, uint32_t min_s
 	if(buffer_size(buf) < min_size) {
 		return NULL;
 	}
+	block->next_free = buf->block;
+	/* track free space in block. */
+	block->free_len -= buf->size;
 	return buf;
 }
 
 static void bufferpoolblock_free_buffer(BufferPoolBlock *block, Buffer *buf) {
 	Buffer *next;
-	/* check if buffer is already free. */
-	if(buffer_is_free(buf)) return;
 	/* track free space in this block. */
 	block->free_len += buf->size;
 	assert(block->free_len <= BUFFER_POOL_BLOCK_USABLE_LENGTH);
