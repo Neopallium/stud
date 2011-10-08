@@ -9,6 +9,14 @@
 #include <string.h>
 #include <stdio.h>
 
+#ifndef BUFFERPOOL_USE_MMAP
+#define BUFFERPOOL_USE_MMAP 1
+#endif
+
+#if BUFFERPOOL_USE_MMAP
+#include <sys/mman.h>
+#endif
+
 #define BUFFER_UNITS_LEN(len) (((len) + (BUFFER_UNITS-1)) / BUFFER_UNITS)
 #define BUFFER_MIN_SIZE (BUFFER_UNITS * 16)
 #define BUFFER_MAX_SIZE ((1<< (sizeof(buflen_t) * 8)) - 1)
@@ -149,7 +157,15 @@ static void bufferpoolblock_reset(BufferPoolBlock *block) {
 static BufferPoolBlock *bufferpoolblock_new() {
 	BufferPoolBlock *block;
 
+#if BUFFERPOOL_USE_MMAP
+	block = (BufferPoolBlock *)mmap(NULL, BUFFER_POOL_BLOCK_LENGTH,
+		PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+	if(block == MAP_FAILED) {
+		perror("Failed to allocate BufferPoolBlock.");
+	}
+#else
 	block = (BufferPoolBlock *)malloc(BUFFER_POOL_BLOCK_LENGTH);
+#endif
 	block->pool = NULL;
 	/* clear block. */
 	bufferpoolblock_reset(block);
@@ -159,7 +175,11 @@ static BufferPoolBlock *bufferpoolblock_new() {
 
 static void bufferpoolblock_free(BufferPoolBlock *block) {
 	memset(&(block->blocks), 0, sizeof(block->blocks));
+#if BUFFERPOOL_USE_MMAP
+	munmap(block, BUFFER_POOL_BLOCK_LENGTH);
+#else
 	free(block);
+#endif
 }
 
 static Buffer *bufferpoolblock_get_buffer(BufferPoolBlock *block, uint32_t min_size) {
