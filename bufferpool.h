@@ -78,4 +78,6 @@ void bufferpool_free(BufferPool *pool);
 
 Buffer *bufferpool_get_buffer(BufferPool *pool, uint32_t min_len);
 
+void bufferpool_print_stats(BufferPool *pool);
+
 #endif /* BUFFER_POOL_H */

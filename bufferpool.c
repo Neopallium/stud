@@ -7,6 +7,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #define BUFFER_UNITS_LEN(len) (((len) + (BUFFER_UNITS-1)) / BUFFER_UNITS)
 #define BUFFER_MIN_SIZE (BUFFER_UNITS * 16)
@@ -219,10 +220,11 @@ struct BufferPool {
 	LIST_HEAD(usedlist, BufferPoolBlock) used_head;
 	LIST_HEAD(freelist, BufferPoolBlock) free_head;
 	BufferPoolBlock *cur_block;
-	uint32_t total_blocks;
-	uint32_t free_blocks;
 	size_t min_free_blocks;
 	size_t max_free_blocks;
+	uint32_t total_blocks;
+	uint32_t free_blocks;
+	uint32_t peak_blocks;
 };
 
 static BufferPoolBlock *bufferpool_new_block(BufferPool *pool) {
@@ -231,6 +233,9 @@ static BufferPoolBlock *bufferpool_new_block(BufferPool *pool) {
 	LIST_INSERT_HEAD(&(pool->free_head), block, blocks);
 	pool->free_blocks++;
 	pool->total_blocks++;
+	if(pool->total_blocks > pool->peak_blocks) {
+		pool->peak_blocks = pool->total_blocks;
+	}
 
 	return block;
 }
@@ -242,6 +247,7 @@ BufferPool *bufferpool_new_full(size_t min_free, size_t max_free) {
 	pool = (BufferPool *)malloc(sizeof(BufferPool));
 	pool->total_blocks = 0;
 	pool->free_blocks = 0;
+	pool->peak_blocks = 0;
 	pool->cur_block = NULL;
 	if(min_free > BUFFER_POOL_BLOCK_LENGTH) {
 		pool->min_free_blocks = min_free / BUFFER_POOL_BLOCK_LENGTH;
@@ -341,5 +347,10 @@ Buffer *bufferpool_get_buffer(BufferPool *pool, uint32_t min_len) {
 	} while(1);
 
 	return NULL;
+}
+
+void bufferpool_print_stats(BufferPool *pool) {
+	printf("buffer: total=%10u, free=%10u, peak=%10u\n",
+		pool->total_blocks, pool->free_blocks, pool->peak_blocks);
 }
 
