@@ -9,6 +9,14 @@
 #include <string.h>
 #include <stdio.h>
 
+#ifndef USE_VALGRIND
+#define USE_VALGRIND 0
+#endif
+
+#if USE_VALGRIND
+#include <valgrind/valgrind.h>
+#endif
+
 #ifndef BUFFERPOOL_USE_MMAP
 #define BUFFERPOOL_USE_MMAP 1
 #endif
@@ -83,6 +91,9 @@ void buffer_free(Buffer *buf) {
 	buf->len = BUFFER_FREE_MARK;
 	/* tell owner block that the buffer is free. */
 	block = (BufferPoolBlock *)BUFFER_OFFSET_SUB(buf, buf->block);
+#if USE_VALGRIND
+	VALGRIND_MEMPOOL_FREE(block, buffer_data(buf));
+#endif
 	bufferpoolblock_free_buffer(block, buf);
 }
 
@@ -100,8 +111,16 @@ static void buffer_split(Buffer *buf, buflen_t new_size) {
 	}
 	/* we can split this buffer. */
 	buf->size = new_size;
+#if USE_VALGRIND
+	block = (BufferPoolBlock *)BUFFER_OFFSET_SUB(buf, buf->block);
+	/* realloc buffer space. */
+	VALGRIND_MEMPOOL_CHANGE(block, buffer_data(buf), buffer_data(buf), buffer_size(buf));
+#endif
 	/* create new next buffer. */
 	next = buffer_get_next(buf);
+#if USE_VALGRIND
+	VALGRIND_MEMPOOL_ALLOC(block, next, sizeof(Buffer));
+#endif
 	/* make sure the userdata part of the buffer header is cleared. */
 	memset(next, 0, sizeof(Buffer));
 	next->block = buf->block + new_size;
@@ -142,6 +161,9 @@ static void bufferpoolblock_reset(BufferPoolBlock *block) {
 
 	/* initialize last buffer. */
 	buf = BUFFER_POOL_BLOCK_TO_BUFFER(block, BUFFER_POOL_BLOCK_LAST_BUFFER);
+#if USE_VALGRIND
+	VALGRIND_MEMPOOL_ALLOC(block, buf, sizeof(Buffer));
+#endif
 	buf->block = BUFFER_POOL_BLOCK_LAST_BUFFER;
 	buf->size = 0; /* mark it as the last buffer. */
 	buf->len = 1; /* mark it as non-free. */
@@ -149,6 +171,9 @@ static void bufferpoolblock_reset(BufferPoolBlock *block) {
 	/* initialize first free buffer. */
 	block->next_free = BUFFER_POOL_BLOCK_FIRST_BUFFER;
 	buf = BUFFER_POOL_BLOCK_TO_BUFFER(block, BUFFER_POOL_BLOCK_FIRST_BUFFER);
+#if USE_VALGRIND
+	VALGRIND_MEMPOOL_ALLOC(block, buf, sizeof(Buffer));
+#endif
 	buf->block = BUFFER_POOL_BLOCK_FIRST_BUFFER;
 	buf->size = block->free_size;
 	buf->len = BUFFER_FREE_MARK; /* mark it as free. */
@@ -166,6 +191,9 @@ static BufferPoolBlock *bufferpoolblock_new() {
 #else
 	block = (BufferPoolBlock *)malloc(BUFFER_POOL_BLOCK_LENGTH);
 #endif
+#if USE_VALGRIND
+	VALGRIND_CREATE_MEMPOOL(block, 0, 0);
+#endif
 	block->pool = NULL;
 	/* clear block. */
 	bufferpoolblock_reset(block);
@@ -175,6 +203,9 @@ static BufferPoolBlock *bufferpoolblock_new() {
 
 static void bufferpoolblock_free(BufferPoolBlock *block) {
 	memset(&(block->blocks), 0, sizeof(block->blocks));
+#if USE_VALGRIND
+	VALGRIND_DESTROY_MEMPOOL(block);
+#endif
 #if BUFFERPOOL_USE_MMAP
 	munmap(block, BUFFER_POOL_BLOCK_LENGTH);
 #else
@@ -200,6 +231,9 @@ static Buffer *bufferpoolblock_get_buffer(BufferPoolBlock *block, uint32_t min_s
 	block->next_free = buf->block;
 	/* remove free mark. */
 	buf->len = 0;
+#if USE_VALGRIND
+	VALGRIND_MEMPOOL_ALLOC(block, buffer_data(buf), buffer_size(buf));
+#endif
 	/* track free space in block. */
 	block->free_size -= buf->size;
 	assert(block->free_size >= 0);
@@ -213,6 +247,10 @@ static void bufferpoolblock_free_buffer(BufferPoolBlock *block, Buffer *buf) {
 	assert(block->free_size <= BUFFER_POOL_BLOCK_USABLE_SIZE);
 	/* check if block is completely free. */
 	if(block->free_size == BUFFER_POOL_BLOCK_USABLE_SIZE) {
+#if USE_VALGRIND
+		buf = BUFFER_POOL_BLOCK_TO_BUFFER(block, BUFFER_POOL_BLOCK_FIRST_BUFFER);
+		VALGRIND_MEMPOOL_TRIM(block, buf, 0);
+#endif
 		/* block is empty reset it. */
 		bufferpoolblock_reset(block);
 		/* put block on pool's free list. */
@@ -229,6 +267,9 @@ static void bufferpoolblock_free_buffer(BufferPoolBlock *block, Buffer *buf) {
 		}
 		/* combind this buffer with next. */
 		buf->size += next->size;
+#if USE_VALGRIND
+		VALGRIND_MEMPOOL_FREE(block, next);
+#endif
 		/* combind as many buffers as we can. */
 	} while(1);
 }
