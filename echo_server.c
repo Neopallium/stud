@@ -25,7 +25,10 @@
 #define SERVER_DEFAULT_BACKLOG 1024
 #define SERVER_DEFAULT_ACCEPT_TIMEOUT 4
 #define SERVER_DEFAULT_STATS_INTERVAL 4
+
 #define CLIENT_BUFFER_SIZE 1024
+#define CLIENT_MAX_READS 10
+#define CLIENT_MIN_READ_BUF 128
 
 typedef struct EchoClient EchoClient;
 typedef struct EchoServer EchoServer;
@@ -38,8 +41,8 @@ struct EchoClient {
 	uint32_t buf_off;
 	uint32_t buf_len;
 	ev_io io;
-	char buf[CLIENT_BUFFER_SIZE];
 	LIST_ENTRY(EchoClient) clients;
+	char buf[CLIENT_BUFFER_SIZE];
 };
 
 /*
@@ -156,9 +159,31 @@ static int echoclient_error(EchoClient *client, struct ev_loop *loop, const char
 	default:
 		fprintf(stderr, "echoclient_error: %s: %s\n", msg, strerror(errno));
 		echoclient_free(client, loop);
-		break;
+		return -1;
 	}
 	return 0;
+}
+
+static void echoclient_change_events(EchoClient *client, struct ev_loop *loop, int write_blocked) {
+	ev_io *w = &(client->io);
+	int events = 0;
+
+	/* enable reads if we have enought space. */
+	if((CLIENT_BUFFER_SIZE - client->buf_len) >= CLIENT_MIN_READ_BUF) {
+		events |= EV_READ;
+	}
+	/* check if writes are blocked. */
+	if(write_blocked) {
+		events |= EV_WRITE;
+	}
+
+	if(w->events == events) {
+		/* no changed needed. */
+		return;
+	}
+	ev_io_stop(loop, w);
+	ev_io_init(w, echoclient_event_cb, client->fd, events);
+	ev_io_start(loop, w);
 }
 
 static int echoclient_write(EchoClient *client, struct ev_loop *loop) {
@@ -176,8 +201,23 @@ static int echoclient_write(EchoClient *client, struct ev_loop *loop) {
 			/* buffer is empty. */
 			client->buf_off = 0;
 			client->buf_len = 0;
+			/* disable writes, make sure reads are enabled. */
+			echoclient_change_events(client, loop, 0);
+		} else {
+			/* compact data in buffer. */
+			rc = client->buf_off;
+			memmove(client->buf, client->buf + rc, client->buf_len - rc);
+			client->buf_len -= rc;
+			client->buf_off = 0;
+			/* still have data to write. */
+			echoclient_change_events(client, loop, 1);
 		}
 	} else if(rc < 0) {
+		/* check if writing is blocked. */
+		if(errno == EAGAIN) {
+			echoclient_change_events(client, loop, 1);
+			return 0;
+		}
 		return echoclient_error(client, loop, "send");
 	}
 
@@ -186,16 +226,27 @@ static int echoclient_write(EchoClient *client, struct ev_loop *loop) {
 
 static int echoclient_read(EchoClient *client, struct ev_loop *loop) {
 	int rc;
+	int i;
+	int read_more;
 
 	assert(client->buf_len <= CLIENT_BUFFER_SIZE);
-	do {
-		rc = recv(client->fd, client->buf + client->buf_len, CLIENT_BUFFER_SIZE - client->buf_len, 0);
-	} while(rc < 0 && errno == EINTR);
-	if(rc > 0) {
-		/* got data. */
-		client->buf_len += rc;
-		/* try sending data now. */
-		return echoclient_write(client, loop);
+	for(i = 0; i < CLIENT_MAX_READS; i++) {
+		do {
+			rc = recv(client->fd, client->buf + client->buf_len, CLIENT_BUFFER_SIZE - client->buf_len, 0);
+		} while(rc < 0 && errno == EINTR);
+		if(rc > 0) {
+			/* got data. */
+			client->buf_len += rc;
+			/* try to read more if the last read filled the buffer. */
+			read_more = (CLIENT_BUFFER_SIZE == client->buf_len) ? 1 : 0;
+			/* try sending data now. */
+			rc = echoclient_write(client, loop);
+			/* if write error or buffer is not empty, then return. */
+			if(rc < 0 || client->buf_len > 0 || read_more == 0) return rc;
+			/* empty buffer try reading more data. */
+		} else {
+			break;
+		}
 	}
 	if(rc == 0) {
 		/* connection closed. */
@@ -208,13 +259,12 @@ static int echoclient_read(EchoClient *client, struct ev_loop *loop) {
 
 static void echoclient_event_cb(struct ev_loop *loop, ev_io *w, int revents) {
 	EchoClient *client = (EchoClient *)w->data;
-	int rc;
 
-	if(revents & EV_READ) {
-		rc = echoclient_read(client, loop);
-	}
 	if(revents & EV_WRITE) {
-		rc = echoclient_read(client, loop);
+		echoclient_write(client, loop);
+	}
+	if(revents & EV_READ) {
+		echoclient_read(client, loop);
 	}
 }
 
