@@ -809,6 +809,7 @@ static void check_ppid(struct ev_loop *loop, ev_timer *w, int revents) {
         ev_timer_stop(loop, w);
         ev_io_stop(loop, &listener);
         close(listener_socket);
+        ev_break(loop, EVBREAK_ALL);
     }
 }
 
@@ -817,6 +818,15 @@ static void print_stats(struct ev_loop *loop, ev_timer *w, int revents) {
     (void) w;
     (void) revents;
     bufferpool_print_stats(pool);
+}
+
+static void exit_cb(struct ev_loop *loop, ev_signal *w, int revents) {
+    (void) revents;
+    ERR("{core} Process %d got SIGINT, closing listener socket.\n", child_num);
+    ev_signal_stop(loop, w);
+    ev_io_stop(loop, &listener);
+    close(listener_socket);
+    ev_break(loop, EVBREAK_ALL);
 }
 
 
@@ -843,6 +853,10 @@ static void handle_connections(SSL_CTX *ctx) {
     ev_timer timer_ppid_check;
     ev_timer_init(&timer_ppid_check, check_ppid, 1.0, 1.0);
     ev_timer_start(loop, &timer_ppid_check);
+
+    ev_signal exitsig;
+    ev_signal_init(&exitsig, exit_cb, SIGINT);
+    ev_signal_start(loop, &exitsig);
 
     ev_timer timer_stats;
     if(OPTIONS.STATS > 0) {
