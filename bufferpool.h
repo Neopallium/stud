@@ -35,7 +35,7 @@ struct Buffer {
 	buflen_t len;    /**< length of data in bytes. */
 	/* read/write */
 	uint8_t  data[];
-};
+} __attribute__((__packed__));
 
 static inline int buffer_is_free(Buffer *buf) {
 	BUFFER_VALID(buf);
