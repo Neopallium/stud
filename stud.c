@@ -103,6 +103,7 @@ typedef struct stud_options {
 #endif
     int QUIET;
     int SYSLOG;
+    int STATS;
 } stud_options;
 
 static stud_options OPTIONS = {
@@ -123,8 +124,9 @@ static stud_options OPTIONS = {
 #ifdef USE_SHARED_CACHE
     0,            // SHARED_CACHE
 #endif
-    0,             // QUIET
-    0             // SYSLOG    
+    0,            // QUIET
+    0,            // SYSLOG
+    0             // STATS
 };
 
 
@@ -808,7 +810,13 @@ static void check_ppid(struct ev_loop *loop, ev_timer *w, int revents) {
         ev_io_stop(loop, &listener);
         close(listener_socket);
     }
+}
 
+static void print_stats(struct ev_loop *loop, ev_timer *w, int revents) {
+    (void) loop;
+    (void) w;
+    (void) revents;
+    bufferpool_print_stats(pool);
 }
 
 
@@ -835,6 +843,12 @@ static void handle_connections(SSL_CTX *ctx) {
     ev_timer timer_ppid_check;
     ev_timer_init(&timer_ppid_check, check_ppid, 1.0, 1.0);
     ev_timer_start(loop, &timer_ppid_check);
+
+    ev_timer timer_stats;
+    if(OPTIONS.STATS > 0) {
+        ev_timer_init(&timer_stats, print_stats, OPTIONS.STATS, OPTIONS.STATS);
+        ev_timer_start(loop, &timer_stats);
+    }
 
     ev_io_init(&listener, handle_accept, listener_socket, EV_READ);
     listener.data = ctx;
@@ -889,6 +903,7 @@ static void usage_fail(const char *prog, const char *msg) {
 "Logging:\n"
 "  -q                       be quiet; emit only error messages\n"
 "  -s                       send log message to syslog in addition to stderr/stdout\n"
+"  -S INTERVAL              print buffer/connection stats.\n"
 "\n"
 "Special:\n"
 "  --write-ip               write 1 octet with the IP family followed by the IP\n"
@@ -950,7 +965,7 @@ static void parse_cli(int argc, char **argv) {
 
     while (1) {
         int option_index = 0;
-        c = getopt_long(argc, argv, "hf:b:n:c:u:r:B:C:qs",
+        c = getopt_long(argc, argv, "hf:b:n:c:u:r:B:C:S:qs",
                 long_options, &option_index);
 
         if (c == -1)
@@ -1031,6 +1046,14 @@ static void parse_cli(int argc, char **argv) {
             OPTIONS.SYSLOG = 1;
             break;
             
+        case 'S':
+            OPTIONS.STATS = atoi(optarg);
+            if ( OPTIONS.STATS <= 0 ) {
+                ERR("stats interval can not be set to %d\n", OPTIONS.STATS);
+                exit(1);
+            }
+            break;
+
         default:
             usage_fail(prog, NULL);
         }
