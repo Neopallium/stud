@@ -383,11 +383,11 @@ static void shutdown_proxy(proxystate *ps, SHUTDOWN_REQUESTOR req) {
         SSL_set_shutdown(ps->ssl, SSL_SENT_SHUTDOWN);
         SSL_free(ps->ssl);
 
-        Buffer *buf;
-        STAILQ_FOREACH(buf, &ps->buf_up, bufs) {
+        Buffer *buf,*next;
+        STAILQ_FOREACH_SAFE(buf, &ps->buf_up, bufs, next) {
             buffer_free(buf);
         }
-        STAILQ_FOREACH(buf, &ps->buf_down, bufs) {
+        STAILQ_FOREACH_SAFE(buf, &ps->buf_down, bufs, next) {
             buffer_free(buf);
         }
         free(ps);

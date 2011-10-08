@@ -271,15 +271,22 @@ BufferPool *bufferpool_new_full(size_t min_free, size_t max_free) {
 }
 
 void bufferpool_free(BufferPool *pool) {
-	BufferPoolBlock *block;
+	BufferPoolBlock *block, *next;
 
 	/* free all blocks.  All blocks should be on the free list. */
-	LIST_FOREACH(block, &(pool->free_head), blocks) {
+	LIST_FOREACH_SAFE(block, &(pool->free_head), blocks, next) {
 		bufferpoolblock_free(block);
 		pool->free_blocks--;
 	}
 	assert(pool->free_blocks == 0);
 
+	/* free cur_block. */
+	block = pool->cur_block;
+	if(block) {
+		/* remove from used block list. */
+		LIST_REMOVE(block, blocks);
+		bufferpoolblock_free(block);
+	}
 	/* make the used lists is empty. */
 	assert(LIST_EMPTY(&(pool->used_head)));
 
