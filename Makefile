@@ -1,7 +1,10 @@
-all: stud
+all: stud echo_server
 
 stud: stud.c bufferpool.c bufferpool.h
 	gcc -O2 -g -std=c99 -fno-strict-aliasing -Wall -W -I/usr/include/libev -I/usr/local/include -L/usr/local/lib -I. -o stud bufferpool.c stud.c -D_GNU_SOURCE -lssl -lcrypto -lev
+
+echo_server: echo_server.c
+	gcc -O2 -g -std=c99 -fno-strict-aliasing -Wall -W -I/usr/include/libev -I/usr/local/include -L/usr/local/lib -I. -o echo_server echo_server.c -D_GNU_SOURCE -lev
 
 # The -shared targets use shared memory between child processes
 # for the SSL session cache--potentially a huge performance gain
