@@ -52,6 +52,8 @@
 #include <openssl/x509.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/engine.h>
+#include <openssl/conf.h>
 #include <ev.h>
 
 
@@ -840,6 +842,19 @@ static void handle_connections(SSL_CTX *ctx) {
 
     ev_loop(loop, 0);
     ERR("{core} Child %d exiting.\n", child_num);
+    /* cleanup. */
+    SSL_CTX_free(ctx);
+    ERR_remove_state(0);
+    ENGINE_cleanup();
+    CONF_modules_unload(1);
+    ERR_free_strings();
+    EVP_cleanup();
+    COMP_zlib_cleanup();
+    CRYPTO_cleanup_all_ex_data();
+    ERR_free_strings();
+    ev_default_destroy();
+    bufferpool_free(pool);
+    freeaddrinfo(backaddr);
     exit(1);
 }
 
