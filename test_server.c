@@ -30,25 +30,25 @@
 #define CLIENT_MAX_READS 10
 #define CLIENT_MIN_READ_BUF 128
 
-typedef struct EchoClient EchoClient;
-typedef struct EchoServer EchoServer;
+typedef struct TestClient TestClient;
+typedef struct TestServer TestServer;
 
 /*
- * Echo Client.
+ * Test Client.
  */
-struct EchoClient {
+struct TestClient {
 	int fd;
 	uint32_t buf_off;
 	uint32_t buf_len;
 	ev_io io;
-	LIST_ENTRY(EchoClient) clients;
+	LIST_ENTRY(TestClient) clients;
 	char buf[CLIENT_BUFFER_SIZE];
 };
 
 /*
- * Echo Server
+ * Test Server
  */
-struct EchoServer {
+struct TestServer {
 	/* options. */
 	struct addrinfo *addr;
 	const char *host;
@@ -70,7 +70,7 @@ struct EchoServer {
 	int num_clients;
 	int peak_clients;
 	/* clients. */
-	LIST_HEAD(listclient, EchoClient) clients;
+	LIST_HEAD(listclient, TestClient) clients;
 };
 
 /*
@@ -99,15 +99,15 @@ int set_nonblock(int sock, int nonblock) {
 }
 
 /*
- * Echo Client.
+ * Test Client.
  */
-static void echoclient_event_cb(struct ev_loop *loop, ev_io *w, int revents);
+static void testclient_event_cb(struct ev_loop *loop, ev_io *w, int revents);
 
-static EchoClient *echoclient_new(int fd, struct ev_loop *loop) {
-	EchoClient *client;
+static TestClient *testclient_new(int fd, struct ev_loop *loop) {
+	TestClient *client;
 	int val, rc;
 
-	client = (EchoClient *)malloc(sizeof(EchoClient));
+	client = (TestClient *)malloc(sizeof(TestClient));
 	client->fd = fd;
 	client->buf_off = 0;
 	client->buf_len = 0;
@@ -116,13 +116,13 @@ static EchoClient *echoclient_new(int fd, struct ev_loop *loop) {
 	val = 1;
 	rc = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(int));
 	if(rc < 0) {
-		perror("echoclient_new(): TCP_NODELAY");
+		perror("testclient_new(): TCP_NODELAY");
 		goto error_cleanup;
 	}
 	if(set_nonblock(fd, 1) < 0) goto error_cleanup;
 
 	/* register socket for read. */
-	ev_io_init(&client->io, echoclient_event_cb, fd, EV_READ);
+	ev_io_init(&client->io, testclient_event_cb, fd, EV_READ);
 	ev_io_start(loop, &(client->io));
 	client->io.data = client;
 
@@ -134,8 +134,8 @@ error_cleanup:
 	return NULL;
 }
 
-static void echoclient_free(EchoClient *client, struct ev_loop *loop) {
-	EchoServer *server = (EchoServer *)ev_userdata(loop);
+static void testclient_free(TestClient *client, struct ev_loop *loop) {
+	TestServer *server = (TestServer *)ev_userdata(loop);
 	server->num_clients--;
 
 	/* remove from client list. */
@@ -148,7 +148,7 @@ static void echoclient_free(EchoClient *client, struct ev_loop *loop) {
 	free(client);
 }
 
-static int echoclient_error(EchoClient *client, struct ev_loop *loop, const char *msg) {
+static int testclient_error(TestClient *client, struct ev_loop *loop, const char *msg) {
 	switch(errno) {
 #if (defined(EWOULDBLOCK) && (EWOULDBLOCK != EAGAIN))
 	case EWOULDBLOCK:
@@ -157,14 +157,14 @@ static int echoclient_error(EchoClient *client, struct ev_loop *loop, const char
 		/* ignore these errors. */
 		break;
 	default:
-		fprintf(stderr, "echoclient_error: %s: %s\n", msg, strerror(errno));
-		echoclient_free(client, loop);
+		fprintf(stderr, "testclient_error: %s: %s\n", msg, strerror(errno));
+		testclient_free(client, loop);
 		return -1;
 	}
 	return 0;
 }
 
-static void echoclient_change_events(EchoClient *client, struct ev_loop *loop, int write_blocked) {
+static void testclient_change_events(TestClient *client, struct ev_loop *loop, int write_blocked) {
 	ev_io *w = &(client->io);
 	int events = 0;
 
@@ -182,11 +182,11 @@ static void echoclient_change_events(EchoClient *client, struct ev_loop *loop, i
 		return;
 	}
 	ev_io_stop(loop, w);
-	ev_io_init(w, echoclient_event_cb, client->fd, events);
+	ev_io_init(w, testclient_event_cb, client->fd, events);
 	ev_io_start(loop, w);
 }
 
-static int echoclient_write(EchoClient *client, struct ev_loop *loop) {
+static int testclient_write(TestClient *client, struct ev_loop *loop) {
 	int rc;
 	(void)loop;
 
@@ -202,7 +202,7 @@ static int echoclient_write(EchoClient *client, struct ev_loop *loop) {
 			client->buf_off = 0;
 			client->buf_len = 0;
 			/* disable writes, make sure reads are enabled. */
-			echoclient_change_events(client, loop, 0);
+			testclient_change_events(client, loop, 0);
 		} else {
 			/* compact data in buffer. */
 			rc = client->buf_off;
@@ -210,21 +210,21 @@ static int echoclient_write(EchoClient *client, struct ev_loop *loop) {
 			client->buf_len -= rc;
 			client->buf_off = 0;
 			/* still have data to write. */
-			echoclient_change_events(client, loop, 1);
+			testclient_change_events(client, loop, 1);
 		}
 	} else if(rc < 0) {
 		/* check if writing is blocked. */
 		if(errno == EAGAIN) {
-			echoclient_change_events(client, loop, 1);
+			testclient_change_events(client, loop, 1);
 			return 0;
 		}
-		return echoclient_error(client, loop, "send");
+		return testclient_error(client, loop, "send");
 	}
 
 	return 0;
 }
 
-static int echoclient_read(EchoClient *client, struct ev_loop *loop) {
+static int testclient_read(TestClient *client, struct ev_loop *loop) {
 	int rc;
 	int i;
 	int read_more;
@@ -240,7 +240,7 @@ static int echoclient_read(EchoClient *client, struct ev_loop *loop) {
 			/* try to read more if the last read filled the buffer. */
 			read_more = (CLIENT_BUFFER_SIZE == client->buf_len) ? 1 : 0;
 			/* try sending data now. */
-			rc = echoclient_write(client, loop);
+			rc = testclient_write(client, loop);
 			/* if write error or buffer is not empty, then return. */
 			if(rc < 0 || client->buf_len > 0 || read_more == 0) return rc;
 			/* empty buffer try reading more data. */
@@ -250,36 +250,36 @@ static int echoclient_read(EchoClient *client, struct ev_loop *loop) {
 	}
 	if(rc == 0) {
 		/* connection closed. */
-		echoclient_free(client, loop);
+		testclient_free(client, loop);
 		return 0;
 	}
 
-	return echoclient_error(client, loop, "recv");
+	return testclient_error(client, loop, "recv");
 }
 
-static void echoclient_event_cb(struct ev_loop *loop, ev_io *w, int revents) {
-	EchoClient *client = (EchoClient *)w->data;
+static void testclient_event_cb(struct ev_loop *loop, ev_io *w, int revents) {
+	TestClient *client = (TestClient *)w->data;
 
 	if(revents & EV_WRITE) {
-		echoclient_write(client, loop);
+		testclient_write(client, loop);
 	}
 	if(revents & EV_READ) {
-		echoclient_read(client, loop);
+		testclient_read(client, loop);
 	}
 }
 
 /*
- * Echo Server.
+ * Test Server.
  */
-static EchoServer *echoserver_new() {
-	EchoServer *server;
-	server = (EchoServer *)calloc(1,sizeof(EchoServer));
+static TestServer *testserver_new() {
+	TestServer *server;
+	server = (TestServer *)calloc(1,sizeof(TestServer));
 	server->fd = -1;
 	return server;
 }
 
-static void echoserver_free(EchoServer *server) {
-	EchoClient *client, *next;
+static void testserver_free(TestServer *server) {
+	TestClient *client, *next;
 	struct ev_loop *loop = server->loop;
 
 	/* cleanup server. */
@@ -287,7 +287,7 @@ static void echoserver_free(EchoServer *server) {
 
 	/* close clients. */
 	LIST_FOREACH_SAFE(client, &(server->clients), clients, next) {
-		echoclient_free(client, loop);
+		testclient_free(client, loop);
 	}
 
 	if(server->fd >= 0) {
@@ -301,9 +301,9 @@ static void echoserver_free(EchoServer *server) {
 	free(server);
 }
 
-static void echoserver_accept(struct ev_loop *loop, ev_io *w, int revents) {
-	EchoServer *server = (EchoServer *)w->data;
-	EchoClient *client;
+static void testserver_accept(struct ev_loop *loop, ev_io *w, int revents) {
+	TestServer *server = (TestServer *)w->data;
+	TestClient *client;
 	int fd;
 	(void)loop;
 	(void)revents;
@@ -324,7 +324,7 @@ static void echoserver_accept(struct ev_loop *loop, ev_io *w, int revents) {
 	}
 
 	/* create client. */
-	client = echoclient_new(fd, loop);
+	client = testclient_new(fd, loop);
 	if(client) {
 		server->num_clients++;
 		if(server->num_clients > server->peak_clients) {
@@ -336,15 +336,15 @@ static void echoserver_accept(struct ev_loop *loop, ev_io *w, int revents) {
 
 }
 
-static void echoserver_stats_cb(struct ev_loop *loop, ev_timer *w, int revents) {
-	EchoServer *server = (EchoServer *)w->data;
+static void testserver_stats_cb(struct ev_loop *loop, ev_timer *w, int revents) {
+	TestServer *server = (TestServer *)w->data;
 	(void)loop;
 	(void)revents;
 
 	fprintf(stdout, "stats: clients: %-6d, peak: %-6d\n", server->num_clients, server->peak_clients);
 }
 
-static void echoserver_exit_cb(struct ev_loop *loop, ev_signal *w, int revents) {
+static void testserver_exit_cb(struct ev_loop *loop, ev_signal *w, int revents) {
 	(void)revents;
 
 	ev_signal_stop(loop, w);
@@ -353,7 +353,7 @@ static void echoserver_exit_cb(struct ev_loop *loop, ev_signal *w, int revents) 
 
 static void print_usage(int argc, char *argv[]);
 
-static int echoserver_init(EchoServer *server, int argc, char *argv[]) {
+static int testserver_init(TestServer *server, int argc, char *argv[]) {
 	struct addrinfo *addr, hints;
 	int rc;
 	int c;
@@ -409,26 +409,26 @@ static int echoserver_init(EchoServer *server, int argc, char *argv[]) {
 
 	/* create server socket. */
 	fd = socket(addr->ai_family, SOCK_STREAM, IPPROTO_TCP);
-	return_on_error(echoserver_init, fd, "socket", -1);
+	return_on_error(testserver_init, fd, "socket", -1);
 	server->fd = fd;
 	/* register server socket for accepting. */
-	ev_io_init(&server->listener, echoserver_accept, fd, EV_READ);
+	ev_io_init(&server->listener, testserver_accept, fd, EV_READ);
 	ev_io_start(server->loop, &server->listener);
 	server->listener.data = server;
  
 	/* register signal handlers. */
-	ev_signal_init(&server->sig_int, echoserver_exit_cb, SIGINT);
+	ev_signal_init(&server->sig_int, testserver_exit_cb, SIGINT);
 	ev_signal_start(server->loop, &server->sig_int);
 	server->sig_int.data = server;
 	ev_unref(server->loop);
-	ev_signal_init(&server->sig_term, echoserver_exit_cb, SIGTERM);
+	ev_signal_init(&server->sig_term, testserver_exit_cb, SIGTERM);
 	ev_signal_start(server->loop, &server->sig_term);
 	server->sig_term.data = server;
 	ev_unref(server->loop);
 
 	/* register stats timer. */
 	if(server->stats_ts > 0) {
-		ev_timer_init(&server->stats, echoserver_stats_cb, server->stats_ts, server->stats_ts);
+		ev_timer_init(&server->stats, testserver_stats_cb, server->stats_ts, server->stats_ts);
 		ev_timer_start(server->loop, &server->stats);
 		server->stats.data = server;
 		ev_unref(server->loop);
@@ -436,32 +436,32 @@ static int echoserver_init(EchoServer *server, int argc, char *argv[]) {
 
 	c = 1;
 	rc = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &c, sizeof(int));
-	return_on_error(echoserver_init, rc, "SO_REUSEADDR", -1);
+	return_on_error(testserver_init, rc, "SO_REUSEADDR", -1);
 #ifdef SO_REUSEPORT
 	c = 1;
 	rc = setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &c, sizeof(int));
-	return_on_error(echoserver_init, rc, "SO_REUSEPORT", -1);
+	return_on_error(testserver_init, rc, "SO_REUSEPORT", -1);
 #endif
 	if(set_nonblock(fd, 1) < 0) return -1;
 
 	/* bind server socket to port. */
 	rc = bind(fd, addr->ai_addr, addr->ai_addrlen);
-	return_on_error(echoserver_init, rc, "bind", -1);
+	return_on_error(testserver_init, rc, "bind", -1);
 
 #if TCP_DEFER_ACCEPT
 	c = server->accept_timeout;
 	rc = setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &c, sizeof(int));
-	return_on_error(echoserver_init, rc, "TCP_DEFER_ACCEPT", -1);
+	return_on_error(testserver_init, rc, "TCP_DEFER_ACCEPT", -1);
 #endif
 
 	/* put server socket in listen mode and set backlog. */
 	rc = listen(fd, server->backlog);
-	return_on_error(echoserver_init, rc, "listen", -1);
+	return_on_error(testserver_init, rc, "listen", -1);
 
 	return 0;
 }
 
-static void echoserver_start(EchoServer *server) {
+static void testserver_start(TestServer *server) {
 	ev_loop(server->loop, 0);
 }
 
@@ -476,13 +476,13 @@ static void print_usage(int argc, char *argv[]) {
 }
 
 int main(int argc, char *argv[]) {
-	EchoServer *server;
+	TestServer *server;
 
-	server = echoserver_new();
-	if(echoserver_init(server, argc, argv) >= 0) {
-		echoserver_start(server);
+	server = testserver_new();
+	if(testserver_init(server, argc, argv) >= 0) {
+		testserver_start(server);
 	}
-	echoserver_free(server);
+	testserver_free(server);
 
 	return 0;
 }
